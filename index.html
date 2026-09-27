@@ -1,0 +1,134 @@
+const BASE = 'https://tempmail.plus';
+const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+ 
+const out = (o) => process.stdout.write(JSON.stringify(o, null, 2) + '\n');
+const fail = (error, extra = {}) => {
+  out({ success: false, error, ...extra });
+  process.exit(1);
+};
+ 
+async function getDomains() {
+  const res = await fetch(BASE + '/', { headers: { 'User-Agent': UA, Accept: 'text/html' } });
+  const html = await res.text();
+  const re = /dropdown-item[^>]*>([^<]+)</g;
+  const domains = [];
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const v = m[1].trim();
+    if (v.includes('.') && !v.includes(' ') && !domains.includes(v)) domains.push(v);
+  }
+  if (!domains.length) throw new Error('domain tidak ketemu');
+  return domains;
+}
+ 
+function randomName() {
+  const l = 5 + Math.floor(Math.random() * 3);
+  let w = '';
+  const s = ['aeouy', 'bcdfghkmnpqstvwxz'];
+  let t = Math.floor(Math.random() * 2);
+  let x = t ? 5 : 7;
+  for (let i = 0; i < l; i++) {
+    w += s[t].charAt(Math.floor(Math.random() * s[t].length));
+    if (Math.floor(Math.random() * x) > 1) { t = 1 - t; x = t ? 5 : 10; }
+    else x += 4;
+  }
+  return w;
+}
+ 
+const validName = (n) =>
+  typeof n === 'string' && n.length >= 1 && n.length <= 200 && /^[A-Za-z0-9]+([.\-_][A-Za-z0-9]+)*$/.test(n);
+ 
+async function apiJSON(url) {
+  const res = await fetch(url, {
+    headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'User-Agent': UA, Referer: `${BASE}/en/` },
+  });
+  return res.json();
+}
+ 
+function parseArgs(argv) {
+  const args = [];
+  const opts = {};
+  for (const a of argv) {
+    if (a.startsWith('--')) {
+      const i = a.indexOf('=');
+      if (i === -1) opts[a.slice(2)] = true;
+      else opts[a.slice(2, i)] = a.slice(i + 1);
+    } else args.push(a);
+  }
+  return { args, opts };
+}
+ 
+const [cmd, ...rest] = process.argv.slice(2);
+ 
+try {
+  if (cmd === 'domains') {
+    out({ success: true, domains: await getDomains() });
+  } else if (cmd === 'create') {
+    const { args, opts } = parseArgs(rest);
+    const domains = await getDomains();
+    let domain = (opts.domain || args[0] || domains[0]).replace(/^@/, '').toLowerCase();
+    let name = opts.name || args[1] || randomName();
+    if (!domains.includes(domain)) fail('domain tidak tersedia', { domain, domains });
+    if (!validName(name)) fail('name tidak valid', { name });
+    const email = `${name}@${domain}`;
+    out({ success: true, email, name, pre: name, domain, domains });
+  } else if (cmd === 'inbox') {
+    const { args, opts } = parseArgs(rest);
+    const email = args[0] || opts.email || opts.token;
+    if (!email?.includes('@')) fail('pakai: node tempmail-plus.js inbox <email>');
+    const limit = parseInt(opts.limit ?? 20, 10) || 20;
+    const epin = opts.epin ?? '';
+    const q = new URLSearchParams({ email, limit: String(limit), epin });
+    if (opts['first-id']) q.set('first_id', opts['first-id']);
+    if (opts['last-id']) q.set('last_id', opts['last-id']);
+    const j = await apiJSON(`${BASE}/api/mails?${q}`);
+    if (!j.result) fail(j.err?.msg || 'inbox gagal', { email });
+    out({
+      success: true,
+      email,
+      count: j.count,
+      mails: (j.mail_list || []).map((m) => ({
+        id: m.mail_id,
+        from: m.from_mail,
+        from_name: m.from_name || null,
+        subject: m.subject || null,
+        time: m.time,
+        is_new: !!m.is_new,
+      })),
+      more: j.more,
+      first_id: j.first_id,
+      last_id: j.last_id,
+    });
+  } else if (cmd === 'mail') {
+    const { args, opts } = parseArgs(rest);
+    const email = args[0] || opts.email;
+    const id = args[1] || opts.id;
+    if (!email?.includes('@') || !id) fail('pakai: node tempmail-plus.js mail <email> <id>');
+    const epin = opts.epin ?? '';
+    const q = new URLSearchParams({ email, epin });
+    const j = await apiJSON(`${BASE}/api/mails/${encodeURIComponent(id)}?${q}`);
+    if (!j.result) fail(j.err?.msg || 'mail tidak ketemu', { email, id });
+    out({
+      success: true,
+      email,
+      id: j.mail_id,
+      from: j.from_mail || j.from,
+      from_name: j.from_name || null,
+      subject: j.subject || null,
+      date: j.date || j.time,
+      text: j.text || null,
+      html: j.html || null,
+      attachments: (j.attachments || []).map((a) => ({
+        id: a.attachment_id,
+        name: a.name,
+        size: a.size,
+        url: `${BASE}/api/mails/${encodeURIComponent(id)}/attachments/${encodeURIComponent(a.attachment_id)}?email=${encodeURIComponent(email)}&epin=${encodeURIComponent(epin)}`,
+      })),
+    });
+  } else {
+    fail('pakai: domains | create [domain] [name] | inbox <email> | mail <email> <id>');
+  }
+} catch (e) {
+  fail(e.message || String(e));
+}
+ 
